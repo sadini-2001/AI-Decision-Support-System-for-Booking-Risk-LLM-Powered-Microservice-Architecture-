@@ -137,7 +137,6 @@ Open in browser: http://localhost:8501
 ---
 
 ## 📸 Demo
-
-*(Add screenshots or demo video here)*
+![Demo Screenshot](screenshots/demo_1.png)
 
 - Rewrite the same thing without change anything as Readme.md file
