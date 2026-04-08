@@ -283,22 +283,6 @@ Open in browser: http://localhost:8501
 
 ---
 
-## 📤 Output Schema
-
-```python
-{
-    "case_text":            str,   # Human-readable booking summary (for UI)
-    "enriched_text":        str,   # Categorical text used for embedding
-    "llm_booking_summary":  str,   # Number-free summary passed to LLM
-    "retrieved_count":      int,   # Number of similar cases retrieved
-    "retrieved_cases":      str,   # Formatted retrieved cases (categories only)
-    "risk_level":           str,   # "Low" | "Medium" | "High"
-    "confidence":           float, # Model confidence % (e.g. 99.5)
-    "retrieval_mode":       str,   # "outcome-aligned" | "fallback-unfiltered" | ...
-    "analysis":             str,   # Full LLM-generated explanation
-}
-```
-
 ### Retrieval Mode Reference
 
 | Value | Meaning |
