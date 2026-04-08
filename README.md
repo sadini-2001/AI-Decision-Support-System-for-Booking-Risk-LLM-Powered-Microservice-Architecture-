@@ -248,9 +248,12 @@ AI_DecisionSupportSystem_for_BookingRisk/
 │   ├── pipeline.py          # Core RAG + ML pipeline
 │   └── utils.py             # input_to_case() and helpers
 │
-├── backend/
-│   └── main.py              # FastAPI app
-│
+├── backend/                 # FastAPI app
+│   └── main.py   
+|             
+│── Data/
+│   └── hotel_booking_cancellation.csv # data
+|
 ├── frontend/
 │   └── app.py               # Streamlit UI
 │
@@ -262,8 +265,7 @@ AI_DecisionSupportSystem_for_BookingRisk/
 │   ├── demo_2.png
 │   ├── demo_3.png
 │   └── demo_4.png
-│
-├── .env                     # API keys (not committed)
+│             
 ├── requirements.txt
 └── README.md
 ```
