@@ -47,9 +47,6 @@ except FileNotFoundError:
 
 # ─────────────────────────────────────────────
 # 3. FEATURE CATEGORIZATION FUNCTIONS
-#    Used for BOTH embedding text AND retrieved
-#    case formatting → consistent language,
-#    no raw numbers passed to LLM
 # ─────────────────────────────────────────────
 MONTHS = ['January','February','March','April','May','June',
           'July','August','September','October','November','December']
@@ -70,15 +67,15 @@ ONE_HOT_COLS = {
 
 def categorize_lead_time(lead_time: int) -> str:
     if lead_time <= 7:
-        return "very short (same week)"
+        return "very short lead time"
     elif lead_time <= 30:
-        return "short (within a month)"
+        return "short lead time"
     elif lead_time <= 90:
-        return "moderate (1-3 months)"
+        return "moderate lead time"
     elif lead_time <= 180:
-        return "long (3-6 months)"
+        return "long lead time"
     else:
-        return "very long (over 6 months)"
+        return "very long lead time"
 
 def categorize_adr(adr: float) -> str:
     if adr < 50:
@@ -94,13 +91,13 @@ def categorize_adr(adr: float) -> str:
 
 def categorize_total_stay(nights: int) -> str:
     if nights <= 1:
-        return "one night"
+        return "one-night stay"
     elif nights <= 3:
-        return "short (2-3 nights)"
+        return "short stay"
     elif nights <= 7:
-        return "week-long"
+        return "week-long stay"
     else:
-        return "extended (over a week)"
+        return "extended stay"
 
 def categorize_special_requests(count: int) -> str:
     if count == 0:
@@ -118,7 +115,34 @@ def categorize_previous_cancellations(count: int) -> str:
     elif count == 1:
         return "one prior cancellation"
     else:
-        return f"{count} prior cancellations"
+        return "multiple prior cancellations"
+
+def categorize_booking_changes(count: int) -> str:
+    if count == 0:
+        return "no booking changes"
+    elif count == 1:
+        return "one booking change"
+    else:
+        return "multiple booking changes"
+
+def categorize_waiting_list(days: int) -> str:
+    if days == 0:
+        return "no waiting list time"
+    elif days <= 10:
+        return "short waiting list"
+    else:
+        return "long waiting list"
+
+def categorize_cancel_ratio(prev_cancels: int, prev_not_cancel: int) -> str:
+    ratio = prev_cancels / (prev_cancels + prev_not_cancel + 1)
+    if ratio == 0:
+        return "zero cancellation history"
+    elif ratio < 0.3:
+        return "low historical cancellation rate"
+    elif ratio < 0.6:
+        return "moderate historical cancellation rate"
+    else:
+        return "high historical cancellation rate"
 
 
 # ─────────────────────────────────────────────
@@ -145,7 +169,6 @@ def extract_ml_features(case_data: dict) -> pd.DataFrame:
         "room_mismatch":                  case_data.get("room_mismatch", 0),
         "total_guests":                   case_data.get("total_guests", 1),
         "total_stay":                     case_data.get("total_stay", 1),
-        # engineered features
         "high_risk_flag": int(prev_cancels > 0 and lead_time > 100),
         "cancel_ratio":   prev_cancels / (prev_cancels + prev_not_cancel + 1),
     }
@@ -163,8 +186,6 @@ def extract_ml_features(case_data: dict) -> pd.DataFrame:
 
 # ─────────────────────────────────────────────
 # 5. PINECONE VECTOR STORE + RETRIEVER
-#    FIX 5: score_threshold raised to 0.65
-#    for cleaner, more relevant results
 # ─────────────────────────────────────────────
 pc    = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("booking-decision-index")
@@ -177,7 +198,7 @@ vector_store = PineconeVectorStore(index=index, embedding=embeddings)
 
 retriever = vector_store.as_retriever(
     search_type="similarity_score_threshold",
-    search_kwargs={"k": 5, "score_threshold": 0.65}   # FIX 5: raised from 0.6
+    search_kwargs={"k": 5, "score_threshold": 0.65}
 )
 
 
@@ -210,6 +231,7 @@ llm = GroqLLM()
 
 # ─────────────────────────────────────────────
 # 7. CONVERT FEATURES TO EMBEDDING TEXT
+#    (used for retrieval only — NOT shown to LLM)
 # ─────────────────────────────────────────────
 def convert_features_to_text(case_data: dict) -> str:
     hotel          = case_data.get("hotel", "Unknown")
@@ -238,27 +260,74 @@ def convert_features_to_text(case_data: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# 8. ML-BASED RISK PREDICTION
-#    FIX 3: probability → 3 human-like classes
-#    Low / Medium / High instead of just Low/High
+# 8. BUILD CATEGORY-ONLY BOOKING SUMMARY FOR LLM
+#    *** THIS replaces raw case_text in the prompt ***
+#    No raw numbers. No leaking from input_to_case().
+#    All values derived from categorization functions.
+# ─────────────────────────────────────────────
+def build_llm_booking_summary(case_data: dict) -> str:
+    """
+    Builds a purely categorical, number-free description of the booking
+    for the LLM prompt. Ordered by feature importance (high → low impact).
+    """
+    prev_cancels    = case_data.get("previous_cancellations", 0)
+    prev_not_cancel = case_data.get("previous_bookings_not_canceled", 0)
+    lead_time       = case_data.get("lead_time", 0)
+    is_repeated     = case_data.get("is_repeated_guest", 0)
+    room_mismatch   = case_data.get("room_mismatch", 0)
+    deposit         = case_data.get("deposit_type", "Unknown")
+    market          = case_data.get("market_segment", "Unknown")
+    distribution    = case_data.get("distribution_channel", "Unknown")
+    customer_type   = case_data.get("customer_type", "Unknown")
+    hotel           = case_data.get("hotel", "Unknown")
+    month           = case_data.get("arrival_date_month", "Unknown")
+    meal            = case_data.get("meal", "Unknown")
+    continent       = case_data.get("continent", "Unknown")
+
+    # All values categorized — no raw numbers
+    lines = [
+        # ── Highest-impact features first ──
+        f"- Cancellation history    : {categorize_previous_cancellations(prev_cancels)}",
+        f"- Historical cancel rate  : {categorize_cancel_ratio(prev_cancels, prev_not_cancel)}",
+        f"- Lead time               : {categorize_lead_time(lead_time)}",
+        f"- Deposit type            : {deposit}",
+        f"- Room assignment         : {'room type was changed at check-in' if room_mismatch else 'room assigned as booked'}",
+        f"- Guest status            : {'returning guest' if is_repeated else 'new guest'}",
+        # ── Mid-impact features ──
+        f"- Market segment          : {market}",
+        f"- Distribution channel    : {distribution}",
+        f"- Customer type           : {customer_type}",
+        f"- Daily rate category     : {categorize_adr(case_data.get('adr', 0))}",
+        f"- Length of stay          : {categorize_total_stay(case_data.get('total_stay', 0))}",
+        f"- Special requests        : {categorize_special_requests(case_data.get('total_of_special_requests', 0))}",
+        f"- Booking changes         : {categorize_booking_changes(case_data.get('booking_changes', 0))}",
+        f"- Waiting list            : {categorize_waiting_list(case_data.get('days_in_waiting_list', 0))}",
+        # ── Context features ──
+        f"- Hotel type              : {hotel}",
+        f"- Arrival month           : {month}",
+        f"- Meal plan               : {meal}",
+        f"- Guest origin            : {continent}",
+    ]
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
+# 9. ML-BASED RISK PREDICTION
 # ─────────────────────────────────────────────
 def predict_risk(case_data: dict) -> tuple:
     """
-    Returns (risk_label, confidence_percentage).
+    Returns (risk_label, confidence_percentage, cancel_prob_category).
 
-    Probability thresholds:
+    Thresholds:
       cancel_prob < 0.4  → Low
       cancel_prob < 0.7  → Medium
       cancel_prob >= 0.7 → High
     """
     df            = extract_ml_features(case_data)
     probabilities = rf_model.predict_proba(df)[0]
+    cancel_prob   = float(probabilities[1])
+    confidence    = round(max(probabilities) * 100, 1)
 
-    # probabilities[1] = probability of cancellation (class 1)
-    cancel_prob = float(probabilities[1])
-    confidence  = round(max(probabilities) * 100, 1)
-
-    # FIX 3: 3-class system based on cancellation probability
     if cancel_prob < 0.4:
         risk_label = "Low"
     elif cancel_prob < 0.7:
@@ -270,32 +339,19 @@ def predict_risk(case_data: dict) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# 9. POST-RETRIEVAL FILTERING
-#    FIX 2: filter out retrieved cases whose
-#    lead_time is too far from current booking
-#    so the LLM gets only logically similar cases
+# 10. POST-RETRIEVAL FILTERING BY LEAD TIME
 # ─────────────────────────────────────────────
 def filter_docs(docs: list, case_data: dict) -> list:
-    """
-    Keep only retrieved cases where lead_time is within
-    60 days of the current booking's lead_time.
-    Falls back to all docs if filtering removes everything.
-    """
     current_lead_time = case_data.get("lead_time", 0)
-
     filtered = [
         doc for doc in docs
         if abs((doc.metadata.get("lead_time") or 0) - current_lead_time) < 60
     ]
-
-    # fallback: if filter is too strict, return original docs
     return filtered if filtered else docs
 
 
 # ─────────────────────────────────────────────
-# 10. FORMAT RETRIEVED DOCS
-#     FIX 1: use categories instead of raw numbers
-#     so LLM compares "long vs long" not "150 vs 136"
+# 11. FORMAT RETRIEVED DOCS — category labels only
 # ─────────────────────────────────────────────
 def format_docs(docs: list) -> str:
     lines = []
@@ -307,17 +363,19 @@ def format_docs(docs: list) -> str:
         stay             = meta.get("total_stay") or 0
         special_requests = meta.get("total_of_special_requests") or 0
         prev_cancels     = meta.get("previous_cancellations") or 0
+        prev_not_cancel  = meta.get("previous_bookings_not_canceled") or 0
 
-        # FIX 1: categories instead of raw numbers
         summary = (
-            f"Case {i}: "
-            f"Canceled={meta.get('is_canceled')}, "
-            f"LeadTimeCategory={categorize_lead_time(lead_time)}, "
-            f"Deposit={meta.get('deposit_type')}, "
-            f"Market={meta.get('market_segment')}, "
-            f"CustomerType={meta.get('customer_type')}, "
-            f"PrevCancels={categorize_previous_cancellations(prev_cancels)}, "
-            f"SpecialRequests={categorize_special_requests(special_requests)}, "
+            f"Past booking {i}: "
+            f"Outcome={'Canceled' if meta.get('is_canceled') else 'Not Canceled'}, "
+            f"Lead time={categorize_lead_time(lead_time)}, "
+            f"Deposit={meta.get('deposit_type', 'Unknown')}, "
+            f"Market={meta.get('market_segment', 'Unknown')}, "
+            f"Customer type={meta.get('customer_type', 'Unknown')}, "
+            f"Cancellation history={categorize_previous_cancellations(prev_cancels)}, "
+            f"Historical cancel rate={categorize_cancel_ratio(prev_cancels, prev_not_cancel)}, "
+            f"Room assignment={'changed' if meta.get('room_mismatch') else 'as booked'}, "
+            f"Special requests={categorize_special_requests(special_requests)}, "
             f"Stay={categorize_total_stay(stay)}, "
             f"Rate={categorize_adr(adr)}"
         )
@@ -327,53 +385,70 @@ def format_docs(docs: list) -> str:
 
 
 # ─────────────────────────────────────────────
-# 11. EXPLANATION PROMPT
-#     FIX 4: stronger reasoning instructions
-#     force LLM to compare categories explicitly
+# 12. EXPLANATION PROMPT
+#     Receives ONLY category-based inputs.
+#     Ordered reasoning: high-impact → low-impact.
 # ─────────────────────────────────────────────
 explanation_prompt = ChatPromptTemplate.from_template("""
-You are an AI assistant for hotel booking cancellation risk analysis.
+You are an AI assistant explaining hotel booking cancellation risk decisions.
 
-The risk level has already been determined by a trained machine learning model.
-Your task is ONLY to explain that risk using the provided booking summary and similar past cases.
+The risk level was determined by a trained machine learning model. Your ONLY job is to
+explain WHY using the booking summary and similar past bookings provided below.
 
-──────────────── RULES (STRICT) ────────────────
-- DO NOT change or question the given risk level
-- DO NOT use raw numbers (e.g., 100, 1, 0.5) anywhere in the explanation
-- ONLY use category labels (e.g., "long lead time", "mid-range rate")
-- ONLY use information explicitly provided in:
-  1. Booking summary
-  2. Similar past cases
-- DO NOT assume or invent patterns (e.g., “high-risk channel”) unless clearly visible in similar cases
-- If a feature is NOT present in similar cases, DO NOT use it in reasoning
-- You MUST compare the current booking with similar cases
-- Mention:
-  • At least one similarity  
-  • At least one difference  
+══════════════════════════════════════════════
+ABSOLUTE RULES — violating any rule is an error:
+══════════════════════════════════════════════
+1. DO NOT reproduce, reference, or infer any raw number (e.g. "110", "1", "0.5", "150 days").
+   Use ONLY the category labels already present in the booking summary.
+2. DO NOT change, question, or restate the risk level differently.
+3. The booking summary below is the SINGLE source of truth for the current booking's features.
+   DO NOT contradict it. If it says "one prior cancellation", use that — not zero, not two.
+4. DO NOT invent patterns not visible in the similar past bookings.
+5. You MUST prioritize HIGH-IMPACT features in your reasoning (listed below in order).
+   Do NOT lead with low-impact features (e.g. special requests, meal plan).
+6. You MUST compare the current booking with similar past bookings and state:
+   • At least ONE clear similarity (a shared feature where past bookings had the same outcome)
+   • At least ONE clear difference (where this booking differs from past ones)
+7. Use bullet points only. No paragraphs. No case numbers (e.g. "Past booking 1").
+   Refer to them collectively as "similar past bookings".
 
-──────────────── STYLE ────────────────
-- Be concise and precise
-- Use bullet points ONLY
-- Do NOT mention case numbers (Case 1, Case 2, etc.)
-- Refer to them as “similar past bookings”
+══════════════════════════════════════════════
+FEATURE IMPORTANCE ORDER (reason in this order):
+══════════════════════════════════════════════
+1. Cancellation history (prior cancellations + historical cancel rate)  ← HIGHEST IMPACT
+2. Lead time
+3. Deposit type
+4. Room assignment (mismatch or not)
+5. Guest status (new vs returning)
+6. Market segment / distribution channel
+7. Customer type
+8. Daily rate category
+9. Length of stay
+10. Special requests / booking changes   ← LOWEST IMPACT — mention last or not at all
 
-──────────────── OUTPUT FORMAT ────────────────
+══════════════════════════════════════════════
+OUTPUT FORMAT (follow exactly):
+══════════════════════════════════════════════
 
 Risk Level: {risk_level} (Model confidence: {confidence}%)
 
 Reasoning:
-- [Reason based ONLY on category labels]
-- [Comparison with similar past bookings — include at least one similarity and one difference]
+- [Lead with the highest-impact features that support the risk level]
+- [Next most important supporting feature]
+- [Similarity with similar past bookings: what they share and how those bookings ended]
+- [Difference from similar past bookings: what sets this booking apart]
 
 Recommendation:
-- [One clear and actionable suggestion based on reasoning]
+- [One clear, actionable suggestion tied directly to the reasoning above]
 
-──────────────── INPUT DATA ────────────────
+══════════════════════════════════════════════
+INPUT DATA:
+══════════════════════════════════════════════
 
-Booking summary:
-{case_text}
+Current booking (category labels only — use these as ground truth):
+{llm_booking_summary}
 
-Similar past cases:
+Similar past bookings:
 {retrieved_context}
 """)
 
@@ -381,38 +456,43 @@ output_parser = StrOutputParser()
 
 
 # ─────────────────────────────────────────────
-# 12. MAIN PIPELINE
+# 13. MAIN PIPELINE
 # ─────────────────────────────────────────────
 def analyze_booking(case_data: dict) -> dict:
     """
     Full RAG + ML pipeline:
-    1. Convert features to categorical text for retrieval
+    1. Build categorical text for vector retrieval
     2. Retrieve similar past cases from Pinecone
     3. Filter retrieved cases by lead_time proximity
     4. Predict risk using Random Forest (3-class output)
-    5. Generate explanation using Groq LLM (category-based)
+    5. Build number-free LLM booking summary
+    6. Generate explanation using Groq LLM (category-based only)
     """
 
-    # Step 1: Enriched categorical text for retrieval
+    # Step 1: Categorical text for retrieval (not shown to LLM)
     enriched_text = convert_features_to_text(case_data)
 
-    # Step 2: Original case text for display
+    # Step 2: Human-readable case text for display in the app UI
     case_text = input_to_case(case_data)
 
     # Step 3: Retrieve similar cases
     docs = retriever.invoke(enriched_text)
 
-    # Step 4: Filter by lead_time proximity (FIX 2)
+    # Step 4: Filter by lead_time proximity
     filtered_docs = filter_docs(docs, case_data)
 
-    # Step 5: Predict risk with 3-class system (FIX 3)
+    # Step 5: Predict risk
     risk_level, confidence = predict_risk(case_data)
 
-    # Step 6: Handle no retrieved docs
+    # Step 6: Build the number-free summary for the LLM
+    llm_booking_summary = build_llm_booking_summary(case_data)
+
+    # Step 7: Handle no retrieved docs
     if not filtered_docs:
         return {
             "case_text": case_text,
             "enriched_text": enriched_text,
+            "llm_booking_summary": llm_booking_summary,
             "retrieved_count": 0,
             "risk_level": risk_level,
             "confidence": confidence,
@@ -426,21 +506,22 @@ def analyze_booking(case_data: dict) -> dict:
             )
         }
 
-    # Step 7: Format retrieved docs using categories (FIX 1)
+    # Step 8: Format retrieved docs using categories only
     retrieved_context = format_docs(filtered_docs)
 
-    # Step 8: Generate explanation with improved prompt (FIX 4)
+    # Step 9: Generate explanation
     chain    = explanation_prompt | llm | output_parser
     analysis = chain.invoke({
         "risk_level": risk_level,
         "confidence": confidence,
-        "case_text": case_text,
+        "llm_booking_summary": llm_booking_summary,  # ← category-only, no raw numbers
         "retrieved_context": retrieved_context
     })
 
     return {
         "case_text": case_text,
         "enriched_text": enriched_text,
+        "llm_booking_summary": llm_booking_summary,
         "retrieved_count": len(filtered_docs),
         "retrieved_cases": retrieved_context,
         "risk_level": risk_level,
@@ -450,7 +531,7 @@ def analyze_booking(case_data: dict) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 13. TEST CASES
+# 14. TEST CASES
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
 
@@ -533,14 +614,14 @@ if __name__ == "__main__":
         ["Case A (Risky)", "Case B (Safe)", "Case C (Mixed)"],
         [case_A, case_B, case_C]
     ):
-        print(f"\n{'='*50}")
+        print(f"\n{'='*60}")
         print(f"  {name}")
-        print(f"{'='*50}\n")
+        print(f"{'='*60}\n")
 
         result = analyze_booking(case)
 
-        print("Enriched embedding text:")
-        print(result["enriched_text"])
+        print("LLM Booking Summary (category-only, no raw numbers):")
+        print(result["llm_booking_summary"])
 
         print(f"\nRetrieved cases : {result['retrieved_count']}")
         print(f"Predicted risk  : {result['risk_level']} ({result['confidence']}% confidence)\n")
