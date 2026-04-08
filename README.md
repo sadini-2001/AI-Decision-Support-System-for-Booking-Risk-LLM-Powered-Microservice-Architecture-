@@ -50,11 +50,11 @@ Vector DB (Pinecone, queried directly) + LLM (Groq)
 │  bookings from   │  │  Convert booking fields │
 │  Pinecone        │  │  into category labels   │
 │                  │  │  (no raw numbers)       │
-│  Tier 1: filter  │  └───────────┬─────────────┘
-│  by outcome      │              │
-│  Tier 2: no      │              │
-│  filter fallback │              │
-│  Tier 3: ML-only │              │
+│                  │  └───────────┬─────────────┘
+│                  │              │
+│                  │              │
+│                  │              │
+│                  │              │
 └────────┬─────────┘              │
          │                        │
          │  past cases            │  current booking
