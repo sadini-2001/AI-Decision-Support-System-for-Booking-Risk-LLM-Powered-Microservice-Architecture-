@@ -30,43 +30,54 @@ Vector DB (Pinecone, queried directly) + LLM (Groq)
 ### Internal Pipeline
 
 ```
-Input booking dict
-        │
-        ▼
-┌───────────────────┐
-│  predict_risk()   │  ← Random Forest (sklearn)
-│  3-class output   │    Low / Medium / High
-└────────┬──────────┘
-         │  risk_level used to drive retrieval filter
+ Input booking dict
          │
-         ├─────────────────────────┐
-         │                         │
-         ▼                         ▼
-┌──────────────────────┐   ┌──────────────────────────┐
-│ retrieve_outcome_    │   │ build_llm_booking_summary│
-│ aligned()            │   │                          │
-│                      │   │ Converts raw values into │
-│ Pinecone direct query│   │ category labels only.    │
-│ Tier 1: outcome-     │   │ No raw numbers passed    │
-│  filtered            │   │ to the LLM.              │
-│ Tier 2: unfiltered   │   └──────────────┬───────────┘
-│  fallback            │                  │
-│ Tier 3: ML-only      │                  │
-└────────┬─────────────┘                  │
-         │  similar past cases            │  booking feature summary
-         │  (format_matches)              │  (category labels)
-         └─────────────┬──────────────────┘
-                        │  both inputs combined
-                        ▼
-             ┌──────────────────────┐
-             │  explanation_prompt  │  ← Groq LLaMA 3.1 8B
-             │                      │    Feature-importance-ordered
-             │                      │    reasoning + recommendation
-             └──────────┬───────────┘
-                        │
-                        ▼
-                  analysis dict
+         ▼
+┌─────────────────────────────────────────┐
+│  STEP 1 — predict_risk()                │
+│  Random Forest → Low / Medium / High    │
+└───────────────────┬─────────────────────┘
+                    │
+         risk_level drives what comes next
+                    │
+          ┌─────────┴──────────┐
+          │                    │
+          ▼                    ▼
+┌──────────────────┐  ┌─────────────────────────┐
+│  STEP 2A         │  │  STEP 2B                │
+│  Retrieve        │  │  Build LLM summary      │
+│  similar past    │  │                         │
+│  bookings from   │  │  Convert booking fields │
+│  Pinecone        │  │  into category labels   │
+│                  │  │  (no raw numbers)       │
+│  Tier 1: filter  │  └───────────┬─────────────┘
+│  by outcome      │              │
+│  Tier 2: no      │              │
+│  filter fallback │              │
+│  Tier 3: ML-only │              │
+└────────┬─────────┘              │
+         │                        │
+         │  past cases            │  current booking
+         │  (category labels)     │  (category labels)
+         └──────────┬─────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│  STEP 3 — explanation_prompt            │
+│  Groq LLaMA 3.1 8B                     │
+│  Reasons using feature importance order │
+│  Outputs: risk level + recommendation   │
+└───────────────────┬─────────────────────┘
+                    │
+                    ▼
+             analysis dict
 ```
+
+> 📖 Each step explained in detail:
+> - **Step 1** → [Model-Driven Risk Thresholds](#-model-driven-risk-thresholds)
+> - **Step 2A** → [Handling Evidence Conflict in RAG](#-handling-evidence-conflict-in-rag-key-innovation) · [Improved RAG Retrieval](#-improved-rag-retrieval) · [Step-by-Step: How Retrieval Works](#-step-by-step-how-retrieval-works)
+> - **Step 2B** → [Feature Categorization](#-feature-categorization) · [What Gets Embedded vs. What Gets Stored](#-what-gets-embedded-vs-what-gets-stored-in-pinecone)
+> - **Step 3** → [Prompt Engineering](#-prompt-engineering)
 
 ---
 
@@ -241,13 +252,67 @@ This separation means:
 
 ### 🔸 Improved RAG Retrieval
 
+Three filters are applied on top of vector similarity to ensure only high-quality, relevant cases reach the LLM:
+
 **Cosine similarity threshold (≥ 0.65)** — Drops any retrieved case below this score, ensuring only genuinely similar bookings reach the LLM.
 
 **Lead-time proximity filter (±60 days)** — A booking made 300 days out behaves very differently from one made 5 days out, even if all other features match. Only cases within 60 days of the current booking's lead time are kept, with a safe fallback to unfiltered results if the filter is too strict.
 
 **Server-side metadata filtering (outcome filter)** — Instead of filtering results in Python after retrieval, `index.query()` applies the `is_canceled` condition inside Pinecone directly, guaranteeing every returned case already matches the predicted outcome.
 
-Result: more relevant, realistic, and outcome-consistent retrieved cases.
+### 🔸 Step-by-Step: How Retrieval Works
+
+```
+1. convert_features_to_text()
+   Booking fields → categorized sentence
+   e.g. "long lead time, budget rate, two prior cancellations..."
+                │
+                ▼
+2. _embed()
+   Sentence → 384-dim vector
+   (sentence-transformers/all-MiniLM-L6-v2)
+                │
+                ▼
+3. Outcome filter decided from predicted risk
+   High   → is_canceled == 1
+   Low    → is_canceled == 0
+   Medium → no filter
+                │
+                ▼
+┌─────────────────────────────────────────────────┐
+│  TIER 1 — Outcome-filtered query                │
+│                                                 │
+│  index.query(vector, filter=outcome_filter)     │
+│  → top-5 similar cases matching predicted       │
+│    outcome returned from Pinecone               │
+│  → score threshold (≥ 0.65) applied             │
+│  → lead-time proximity filter (±60 days) applied│
+│                                                 │
+│  Need ≥ 2 results to proceed                    │
+└──────────────────────┬──────────────────────────┘
+                       │ < 2 results?
+                       ▼
+┌─────────────────────────────────────────────────┐
+│  TIER 2 — Unfiltered fallback                   │
+│                                                 │
+│  index.query(vector)  ← no outcome filter       │
+│  → same score + lead-time filters applied       │
+└──────────────────────┬──────────────────────────┘
+                       │ 0 results?
+                       ▼
+┌─────────────────────────────────────────────────┐
+│  TIER 3 — ML-only explanation                   │
+│                                                 │
+│  No cases retrieved. LLM comparison skipped.    │
+│  Returns: "Risk determined by ML model only."   │
+└──────────────────────┬──────────────────────────┘
+                       │ cases retrieved (Tier 1 or 2)
+                       ▼
+4. format_matches()
+   Retrieved cases that passed all filters
+   are formatted using category labels from metadata
+   (raw numbers never reach the LLM)
+```
 
 ### 🔸 Prompt Engineering
 
