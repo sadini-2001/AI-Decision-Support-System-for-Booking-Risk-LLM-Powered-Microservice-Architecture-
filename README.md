@@ -299,7 +299,7 @@ Open in browser: http://localhost:8501
 ![Demo Screenshot](screenshots/demo_2.png)
 ![Demo Screenshot](screenshots/demo_3.png)
 ![Demo Screenshot](screenshots/demo_4.png)
-- Rewrite the same thing without change anything as Readme.md file
+
 
 
 
