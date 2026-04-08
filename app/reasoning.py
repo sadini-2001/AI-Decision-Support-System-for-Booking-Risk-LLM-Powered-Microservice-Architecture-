@@ -334,27 +334,41 @@ def format_docs(docs: list) -> str:
 explanation_prompt = ChatPromptTemplate.from_template("""
 You are an AI assistant for hotel booking cancellation risk analysis.
 
-The risk level has already been decided by a trained machine learning model.
-Your task is ONLY to explain that risk level using the booking summary and similar past cases.
+The risk level has already been determined by a trained machine learning model.
+Your task is ONLY to explain that risk using the provided booking summary and similar past cases.
 
-Rules:
-- Do NOT change or question the given risk level
-- Do NOT use raw numbers to compare — use the category labels provided (e.g. "long lead time", "budget rate")
-- Compare the current booking's categories with the similar cases explicitly
-- Mention at least one similarity AND one difference with the retrieved cases
-- Be concise and specific
-- Use bullet points only
+──────────────── RULES (STRICT) ────────────────
+- DO NOT change or question the given risk level
+- DO NOT use raw numbers (e.g., 100, 1, 0.5) anywhere in the explanation
+- ONLY use category labels (e.g., "long lead time", "mid-range rate")
+- ONLY use information explicitly provided in:
+  1. Booking summary
+  2. Similar past cases
+- DO NOT assume or invent patterns (e.g., “high-risk channel”) unless clearly visible in similar cases
+- If a feature is NOT present in similar cases, DO NOT use it in reasoning
+- You MUST compare the current booking with similar cases
+- Mention:
+  • At least one similarity  
+  • At least one difference  
 
-Output exactly in this format:
+──────────────── STYLE ────────────────
+- Be concise and precise
+- Use bullet points ONLY
+- Do NOT mention case numbers (Case 1, Case 2, etc.)
+- Refer to them as “similar past bookings”
+
+──────────────── OUTPUT FORMAT ────────────────
 
 Risk Level: {risk_level} (Model confidence: {confidence}%)
 
 Reasoning:
-- [feature-based reason using category labels, not raw numbers]
-- [comparison with similar past cases — mention at least one match or contrast]
+- [Reason based ONLY on category labels]
+- [Comparison with similar past bookings — include at least one similarity and one difference]
 
 Recommendation:
-- [one specific action the hotel should take]
+- [One clear and actionable suggestion based on reasoning]
+
+──────────────── INPUT DATA ────────────────
 
 Booking summary:
 {case_text}
@@ -428,6 +442,7 @@ def analyze_booking(case_data: dict) -> dict:
         "case_text": case_text,
         "enriched_text": enriched_text,
         "retrieved_count": len(filtered_docs),
+        "retrieved_cases": retrieved_context,
         "risk_level": risk_level,
         "confidence": confidence,
         "analysis": analysis
