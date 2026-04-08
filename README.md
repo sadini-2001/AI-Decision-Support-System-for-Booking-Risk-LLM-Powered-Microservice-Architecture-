@@ -216,13 +216,38 @@ The key architectural insight is that **prediction must happen before retrieval*
 - ✅ Better alignment between ML predictions and LLM reasoning
 - ✅ Improved trust in the system
 
+### 🔸 What Gets Embedded vs. What Gets Stored in Pinecone
+
+Two separate representations of each booking are maintained in the vector database:
+
+| Layer | Content | Purpose |
+|---|---|---|
+| **Vector (embedding)** | Categorized text built by `convert_features_to_text()` | Drives similarity search — semantic matching, not numeric distance |
+| **Metadata** | Raw field values (`lead_time`, `adr`, `is_canceled`, etc.) | Used for outcome filtering, lead-time proximity filtering, and future analysis |
+
+The embedding text looks like this:
+```
+"Hotel booking case. This booking has long lead time, budget rate, and a short stay.
+There are 2 guests. The booking has no special requests, two prior cancellations,
+no booking changes, not on waiting list, and moderate historical cancellation rate.
+Deposit type is No Deposit. Market segment is Online TA. Customer type is Transient.
+Guest region is Europe. The case has room type changed. Final outcome: Canceled."
+```
+
+This separation means:
+- Similarity search operates on **human-readable semantic categories**, not raw numbers — improving match quality
+- Raw values are preserved in metadata so the system can apply **outcome filtering** and **lead-time proximity filtering** at query time without re-embedding
+- The metadata also serves as a record for **future auditing or retraining** without needing to re-ingest
+
 ### 🔸 Improved RAG Retrieval
 
-- Applied similarity score threshold filtering (cosine ≥ 0.65)
-- Added lead-time proximity filtering (±60 days)
-- Switched from LangChain `.as_retriever()` to direct `index.query()` calls to enable server-side metadata filtering
+**Cosine similarity threshold (≥ 0.65)** — Drops any retrieved case below this score, ensuring only genuinely similar bookings reach the LLM.
 
-Result: more relevant and realistic retrieved cases.
+**Lead-time proximity filter (±60 days)** — A booking made 300 days out behaves very differently from one made 5 days out, even if all other features match. Only cases within 60 days of the current booking's lead time are kept, with a safe fallback to unfiltered results if the filter is too strict.
+
+**Server-side metadata filtering (outcome filter)** — Instead of filtering results in Python after retrieval, `index.query()` applies the `is_canceled` condition inside Pinecone directly, guaranteeing every returned case already matches the predicted outcome.
+
+Result: more relevant, realistic, and outcome-consistent retrieved cases.
 
 ### 🔸 Prompt Engineering
 
