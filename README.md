@@ -22,9 +22,9 @@ Frontend (Streamlit)
         ↓
 Backend API (FastAPI)
         ↓
-ML Model (Random Forest) + RAG Pipeline (LangChain)
+ML Model (Random Forest) + Prompt Chain (LangChain)
         ↓
-Vector DB (Pinecone) + LLM (Groq)
+Vector DB (Pinecone, queried directly) + LLM (Groq)
 ```
 
 ### Internal Pipeline
@@ -37,28 +37,35 @@ Input booking dict
 │  predict_risk()   │  ← Random Forest (sklearn)
 │  3-class output   │    Low / Medium / High
 └────────┬──────────┘
-         │  risk_level needed BEFORE retrieval
-         ▼
-┌──────────────────────────────┐
-│ retrieve_outcome_aligned()   │  ← Pinecone (direct query)
-│  Tier 1: outcome-filtered    │    High  → is_canceled == 1
-│  Tier 2: unfiltered fallback │    Low   → is_canceled == 0
-│  Tier 3: empty → ML-only     │    Medium → no filter
-└────────┬─────────────────────┘
+         │  risk_level used to drive retrieval filter
          │
-         ▼
-┌──────────────────────────┐
-│ build_llm_booking_summary│  ← Category labels only, zero raw numbers
-└────────┬─────────────────┘
-         │
-         ▼
-┌──────────────────────────┐
-│  explanation_prompt      │  ← Groq LLaMA 3.1 8B
-│  + format_matches()      │    Feature-importance-ordered reasoning
-└────────┬─────────────────┘
-         │
-         ▼
-    analysis dict
+         ├─────────────────────────┐
+         │                         │
+         ▼                         ▼
+┌──────────────────────┐   ┌──────────────────────────┐
+│ retrieve_outcome_    │   │ build_llm_booking_summary│
+│ aligned()            │   │                          │
+│                      │   │ Converts raw values into │
+│ Pinecone direct query│   │ category labels only.    │
+│ Tier 1: outcome-     │   │ No raw numbers passed    │
+│  filtered            │   │ to the LLM.              │
+│ Tier 2: unfiltered   │   └──────────────┬───────────┘
+│  fallback            │                  │
+│ Tier 3: ML-only      │                  │
+└────────┬─────────────┘                  │
+         │  similar past cases            │  booking feature summary
+         │  (format_matches)              │  (category labels)
+         └─────────────┬──────────────────┘
+                        │  both inputs combined
+                        ▼
+             ┌──────────────────────┐
+             │  explanation_prompt  │  ← Groq LLaMA 3.1 8B
+             │                      │    Feature-importance-ordered
+             │                      │    reasoning + recommendation
+             └──────────┬───────────┘
+                        │
+                        ▼
+                  analysis dict
 ```
 
 ---
@@ -87,7 +94,7 @@ Input booking dict
 - **Scikit-learn** (Random Forest)
 
 ### AI / GenAI
-- **LangChain** – RAG pipeline orchestration
+- **LangChain** – Prompt chaining (NOT retrieval)
 - **Hugging Face** (sentence-transformers) – Embeddings
 - **Pinecone** – Vector database
 - **Groq LLM** – Explanation generation
@@ -184,16 +191,16 @@ The key architectural insight is that **prediction must happen before retrieval*
 │                                                             │
 │  Requires: ≥ 2 results above cosine threshold (0.65)        │
 └──────────────────────┬──────────────────────────────────────┘
-                       │ < 2 results? → escalate
+                       │ < 2 results? → escalate to Tier 2
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  TIER 2 — Unfiltered Fallback                               │
 │                                                             │
 │  Drops the outcome filter. Returns the closest neighbors    │
 │  regardless of cancellation outcome.                        │
-│  Triggered when canceled cases are rare in the DB.          │
+│  Triggered when outcome-matching cases are sparse in DB.    │
 └──────────────────────┬──────────────────────────────────────┘
-                       │ still 0 results? → escalate
+                       │ 0 results after fallback? → escalate to Tier 3
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  TIER 3 — ML-Only Explanation                               │
@@ -265,7 +272,15 @@ PINECONE_API_KEY=your_pinecone_key
 GROQ_API_KEY=your_groq_key
 ```
 
-### 🔹 4. Run Backend (FastAPI)
+### 🔹 4. Prepare vector database (IMPORTANT)
+
+```bash
+python backend/ingest.py
+```
+
+This uploads booking cases into Pinecone. Must be run before starting the backend.
+
+### 🔹 5. Run Backend (FastAPI)
 
 ```bash
 python -m uvicorn backend.main:app --reload --port 8000
@@ -273,7 +288,7 @@ python -m uvicorn backend.main:app --reload --port 8000
 
 Open in browser: http://127.0.0.1:8000/docs
 
-### 🔹 5. Run Frontend (Streamlit)
+### 🔹 6. Run Frontend (Streamlit)
 
 ```bash
 streamlit run frontend/app.py
@@ -294,12 +309,17 @@ Open in browser: http://localhost:8501
 
 ---
 
+## 🎯 Key Takeaways
+
+- Built a hybrid ML + RAG decision support system from end to end
+- Designed outcome-aligned retrieval to eliminate evidence conflict between ML predictions and LLM reasoning
+- Improved LLM explanation quality using feature categorization instead of raw numerical inputs
+- Developed a full-stack AI application with a production-style architecture (FastAPI + Streamlit)
+
+---
+
 ## 📸 Demo
 ![Demo Screenshot](screenshots/demo_1.png)
 ![Demo Screenshot](screenshots/demo_2.png)
 ![Demo Screenshot](screenshots/demo_3.png)
 ![Demo Screenshot](screenshots/demo_4.png)
-
-
-
-
