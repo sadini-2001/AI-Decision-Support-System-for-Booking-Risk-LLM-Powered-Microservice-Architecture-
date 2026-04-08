@@ -239,37 +239,6 @@ This improved consistency and interpretability of LLM responses.
 | Raw numbers leaking to LLM | Separated `build_llm_booking_summary()` from UI display text |
 | System instability | Debugged components independently |
 
-## 📁 Project Structure
-
-```
-AI_DecisionSupportSystem_for_BookingRisk/
-│
-├── app/
-│   ├── pipeline.py          # Core RAG + ML pipeline
-│   └── utils.py             # input_to_case() and helpers
-│
-├── backend/                 # FastAPI app
-│   └── main.py   
-|             
-│── Data/
-│   └── hotel_booking_cancellation.csv # data
-|
-├── frontend/
-│   └── app.py               # Streamlit UI
-│
-├── model/
-│   └── model.pkl            # Trained Random Forest
-│
-├── screenshots/
-│   ├── demo_1.png
-│   ├── demo_2.png
-│   ├── demo_3.png
-│   └── demo_4.png
-│             
-├── requirements.txt
-└── README.md
-```
-
 ---
 
 ## ▶️ How to Run the Project
