@@ -185,7 +185,10 @@ def extract_ml_features(case_data: dict) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────
-# 5. PINECONE VECTOR STORE + RETRIEVER
+# 5. PINECONE CLIENT + EMBEDDINGS
+#    We now use the Pinecone client directly
+#    (not a LangChain retriever) so we can pass
+#    a metadata filter at query time.
 # ─────────────────────────────────────────────
 pc    = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("booking-decision-index")
@@ -194,16 +197,143 @@ embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
+# Keep the LangChain vector store only for embedding convenience.
+# We will NOT use its retriever — we call index.query() directly.
 vector_store = PineconeVectorStore(index=index, embedding=embeddings)
-
-retriever = vector_store.as_retriever(
-    search_type="similarity_score_threshold",
-    search_kwargs={"k": 5, "score_threshold": 0.65}
-)
 
 
 # ─────────────────────────────────────────────
-# 6. GROQ LLM WRAPPER
+# 6. OUTCOME-ALIGNED RETRIEVAL
+#
+#  Strategy (3 tiers):
+#
+#  Tier 1 — PRIMARY (outcome-filtered):
+#    Query Pinecone with a metadata filter so only
+#    cases whose outcome matches the predicted risk
+#    are returned.
+#      High   → filter is_canceled == 1
+#      Low    → filter is_canceled == 0
+#      Medium → no outcome filter (mixed is fine)
+#
+#  Tier 2 — FALLBACK (unfiltered, if Tier 1 < 2 results):
+#    Run an unfiltered query. This handles the "rare
+#    case" scenario where the outcome class is thin
+#    in the vector DB.
+#
+#  Tier 3 — MIXED CONTEXT (if both tiers fail):
+#    Return an empty list so the pipeline gracefully
+#    falls back to ML-only explanation.
+#
+#  Why 2 as the minimum threshold?
+#    One case is not enough for a comparison bullet.
+#    Two gives the LLM a similarity AND a difference.
+# ─────────────────────────────────────────────
+RETRIEVAL_K         = 5    # how many docs to request
+RETRIEVAL_THRESHOLD = 0.65 # cosine similarity floor
+FALLBACK_MIN        = 2    # min docs before triggering fallback
+
+
+def _embed(text: str) -> list:
+    """Return a raw embedding vector for a text string."""
+    return embeddings.embed_query(text)
+
+
+def _pinecone_query(
+    vector: list,
+    k: int,
+    score_threshold: float,
+    outcome_filter: Optional[dict] = None
+) -> list:
+    """
+    Query Pinecone directly and return a list of dicts:
+      [{"metadata": {...}, "score": float}, ...]
+
+    outcome_filter example: {"is_canceled": {"$eq": 1}}
+    """
+    kwargs = {
+        "vector": vector,
+        "top_k": k,
+        "include_metadata": True,
+    }
+    if outcome_filter:
+        kwargs["filter"] = outcome_filter
+
+    response = index.query(**kwargs)
+
+    # Apply score threshold manually (Pinecone doesn't enforce it server-side)
+    return [
+        match for match in response["matches"]
+        if match["score"] >= score_threshold
+    ]
+
+
+def retrieve_outcome_aligned(
+    query_text: str,
+    risk_level: str,
+    case_data: dict
+) -> list:
+    """
+    Outcome-aligned retrieval with lead-time post-filter.
+
+    Returns a list of Pinecone match dicts that have passed:
+      1. Cosine similarity threshold
+      2. Outcome metadata filter (Tier 1) OR fallback (Tier 2)
+      3. Lead-time proximity filter (±60 days)
+    """
+    query_vector      = _embed(query_text)
+    current_lead_time = case_data.get("lead_time", 0)
+
+    # ── Determine outcome filter based on predicted risk ──────────
+    # High   → show canceled cases  (model says "this will cancel")
+    # Low    → show not-canceled    (model says "this is safe")
+    # Medium → no filter            (mixed context is appropriate)
+    if risk_level == "High":
+        outcome_filter = {"is_canceled": {"$eq": 1}}
+    elif risk_level == "Low":
+        outcome_filter = {"is_canceled": {"$eq": 0}}
+    else:
+        outcome_filter = None   # Medium: no filtering
+
+    # ── Tier 1: outcome-filtered query ───────────────────────────
+    matches = _pinecone_query(
+        vector=query_vector,
+        k=RETRIEVAL_K,
+        score_threshold=RETRIEVAL_THRESHOLD,
+        outcome_filter=outcome_filter,
+    )
+
+    # Apply lead-time proximity filter
+    matches = _filter_by_lead_time(matches, current_lead_time)
+
+    # ── Tier 2: fallback — unfiltered if Tier 1 insufficient ─────
+    if len(matches) < FALLBACK_MIN and outcome_filter is not None:
+        print(
+            f"[WARN] Tier 1 returned only {len(matches)} result(s) "
+            f"for risk={risk_level}. Falling back to unfiltered retrieval."
+        )
+        matches = _pinecone_query(
+            vector=query_vector,
+            k=RETRIEVAL_K,
+            score_threshold=RETRIEVAL_THRESHOLD,
+            outcome_filter=None,   # no outcome filter
+        )
+        matches = _filter_by_lead_time(matches, current_lead_time)
+
+    return matches   # empty list → Tier 3 (handled in main pipeline)
+
+
+def _filter_by_lead_time(matches: list, current_lead_time: int) -> list:
+    """Keep only matches whose lead_time is within 60 days of current booking."""
+    filtered = [
+        m for m in matches
+        if abs((m["metadata"].get("lead_time") or 0) - current_lead_time) < 60
+    ]
+    # If the filter is too strict, return original matches
+    return filtered if filtered else matches
+
+
+# ─────────────────────────────────────────────
+# 7. GROQ LLM WRAPPER
 # ─────────────────────────────────────────────
 _groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -230,7 +360,7 @@ llm = GroqLLM()
 
 
 # ─────────────────────────────────────────────
-# 7. CONVERT FEATURES TO EMBEDDING TEXT
+# 8. CONVERT FEATURES TO EMBEDDING TEXT
 #    (used for retrieval only — NOT shown to LLM)
 # ─────────────────────────────────────────────
 def convert_features_to_text(case_data: dict) -> str:
@@ -260,16 +390,10 @@ def convert_features_to_text(case_data: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# 8. BUILD CATEGORY-ONLY BOOKING SUMMARY FOR LLM
-#    *** THIS replaces raw case_text in the prompt ***
-#    No raw numbers. No leaking from input_to_case().
-#    All values derived from categorization functions.
+# 9. BUILD CATEGORY-ONLY BOOKING SUMMARY FOR LLM
+#    No raw numbers. Ordered by feature importance.
 # ─────────────────────────────────────────────
 def build_llm_booking_summary(case_data: dict) -> str:
-    """
-    Builds a purely categorical, number-free description of the booking
-    for the LLM prompt. Ordered by feature importance (high → low impact).
-    """
     prev_cancels    = case_data.get("previous_cancellations", 0)
     prev_not_cancel = case_data.get("previous_bookings_not_canceled", 0)
     lead_time       = case_data.get("lead_time", 0)
@@ -284,16 +408,13 @@ def build_llm_booking_summary(case_data: dict) -> str:
     meal            = case_data.get("meal", "Unknown")
     continent       = case_data.get("continent", "Unknown")
 
-    # All values categorized — no raw numbers
     lines = [
-        # ── Highest-impact features first ──
         f"- Cancellation history    : {categorize_previous_cancellations(prev_cancels)}",
         f"- Historical cancel rate  : {categorize_cancel_ratio(prev_cancels, prev_not_cancel)}",
         f"- Lead time               : {categorize_lead_time(lead_time)}",
         f"- Deposit type            : {deposit}",
         f"- Room assignment         : {'room type was changed at check-in' if room_mismatch else 'room assigned as booked'}",
         f"- Guest status            : {'returning guest' if is_repeated else 'new guest'}",
-        # ── Mid-impact features ──
         f"- Market segment          : {market}",
         f"- Distribution channel    : {distribution}",
         f"- Customer type           : {customer_type}",
@@ -302,7 +423,6 @@ def build_llm_booking_summary(case_data: dict) -> str:
         f"- Special requests        : {categorize_special_requests(case_data.get('total_of_special_requests', 0))}",
         f"- Booking changes         : {categorize_booking_changes(case_data.get('booking_changes', 0))}",
         f"- Waiting list            : {categorize_waiting_list(case_data.get('days_in_waiting_list', 0))}",
-        # ── Context features ──
         f"- Hotel type              : {hotel}",
         f"- Arrival month           : {month}",
         f"- Meal plan               : {meal}",
@@ -312,17 +432,9 @@ def build_llm_booking_summary(case_data: dict) -> str:
 
 
 # ─────────────────────────────────────────────
-# 9. ML-BASED RISK PREDICTION
+# 10. ML-BASED RISK PREDICTION
 # ─────────────────────────────────────────────
 def predict_risk(case_data: dict) -> tuple:
-    """
-    Returns (risk_label, confidence_percentage, cancel_prob_category).
-
-    Thresholds:
-      cancel_prob < 0.4  → Low
-      cancel_prob < 0.7  → Medium
-      cancel_prob >= 0.7 → High
-    """
     df            = extract_ml_features(case_data)
     probabilities = rf_model.predict_proba(df)[0]
     cancel_prob   = float(probabilities[1])
@@ -339,35 +451,29 @@ def predict_risk(case_data: dict) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# 10. POST-RETRIEVAL FILTERING BY LEAD TIME
+# 11. FORMAT RETRIEVED MATCHES — category labels only
+#     Input is now a list of Pinecone match dicts,
+#     not LangChain Document objects.
 # ─────────────────────────────────────────────
-def filter_docs(docs: list, case_data: dict) -> list:
-    current_lead_time = case_data.get("lead_time", 0)
-    filtered = [
-        doc for doc in docs
-        if abs((doc.metadata.get("lead_time") or 0) - current_lead_time) < 60
-    ]
-    return filtered if filtered else docs
-
-
-# ─────────────────────────────────────────────
-# 11. FORMAT RETRIEVED DOCS — category labels only
-# ─────────────────────────────────────────────
-def format_docs(docs: list) -> str:
+def format_matches(matches: list) -> str:
     lines = []
-    for i, doc in enumerate(docs, start=1):
-        meta = doc.metadata
+    for i, match in enumerate(matches, start=1):
+        meta = match["metadata"]
 
         lead_time        = meta.get("lead_time") or 0
         adr              = meta.get("adr") or 0
         stay             = meta.get("total_stay") or 0
         special_requests = meta.get("total_of_special_requests") or 0
-        prev_cancels     = meta.get("previous_cancellations") or 0
-        prev_not_cancel  = meta.get("previous_bookings_not_canceled") or 0
+        prev_cancels     = int(meta.get("previous_cancellations") or 0)
+        prev_not_cancel  = int(meta.get("previous_bookings_not_canceled") or 0)
+        is_canceled      = meta.get("is_canceled")
+
+        # Normalize is_canceled — Pinecone may store as int or bool
+        canceled_label = "Canceled" if is_canceled in (1, True, "1", "True") else "Not Canceled"
 
         summary = (
             f"Past booking {i}: "
-            f"Outcome={'Canceled' if meta.get('is_canceled') else 'Not Canceled'}, "
+            f"Outcome={canceled_label}, "
             f"Lead time={categorize_lead_time(lead_time)}, "
             f"Deposit={meta.get('deposit_type', 'Unknown')}, "
             f"Market={meta.get('market_segment', 'Unknown')}, "
@@ -386,8 +492,6 @@ def format_docs(docs: list) -> str:
 
 # ─────────────────────────────────────────────
 # 12. EXPLANATION PROMPT
-#     Receives ONLY category-based inputs.
-#     Ordered reasoning: high-impact → low-impact.
 # ─────────────────────────────────────────────
 explanation_prompt = ChatPromptTemplate.from_template("""
 You are an AI assistant explaining hotel booking cancellation risk decisions.
@@ -411,6 +515,8 @@ ABSOLUTE RULES — violating any rule is an error:
    • At least ONE clear difference (where this booking differs from past ones)
 7. Use bullet points only. No paragraphs. No case numbers (e.g. "Past booking 1").
    Refer to them collectively as "similar past bookings".
+8. The similar past bookings have been pre-selected to match the predicted outcome.
+   Use them as EVIDENCE supporting the risk decision — do not question the alignment.
 
 ══════════════════════════════════════════════
 FEATURE IMPORTANCE ORDER (reason in this order):
@@ -448,7 +554,7 @@ INPUT DATA:
 Current booking (category labels only — use these as ground truth):
 {llm_booking_summary}
 
-Similar past bookings:
+Similar past bookings (pre-filtered to match predicted outcome):
 {retrieved_context}
 """)
 
@@ -460,35 +566,42 @@ output_parser = StrOutputParser()
 # ─────────────────────────────────────────────
 def analyze_booking(case_data: dict) -> dict:
     """
-    Full RAG + ML pipeline:
-    1. Build categorical text for vector retrieval
-    2. Retrieve similar past cases from Pinecone
-    3. Filter retrieved cases by lead_time proximity
-    4. Predict risk using Random Forest (3-class output)
-    5. Build number-free LLM booking summary
-    6. Generate explanation using Groq LLM (category-based only)
+    Full RAG + ML pipeline with outcome-aligned retrieval:
+
+    1.  Predict risk first (needed to determine retrieval filter)
+    2.  Build categorical embedding text
+    3.  Retrieve outcome-aligned similar cases from Pinecone
+          Tier 1: metadata-filtered by predicted outcome
+          Tier 2: unfiltered fallback if Tier 1 is too sparse
+    4.  Build number-free LLM booking summary
+    5.  Generate explanation using Groq LLM
+
+    Key design decision — predict BEFORE retrieve:
+    The retrieval filter depends on the predicted risk label,
+    so prediction must come first. This is the correct order.
     """
 
-    # Step 1: Categorical text for retrieval (not shown to LLM)
-    enriched_text = convert_features_to_text(case_data)
-
-    # Step 2: Human-readable case text for display in the app UI
-    case_text = input_to_case(case_data)
-
-    # Step 3: Retrieve similar cases
-    docs = retriever.invoke(enriched_text)
-
-    # Step 4: Filter by lead_time proximity
-    filtered_docs = filter_docs(docs, case_data)
-
-    # Step 5: Predict risk
+    # Step 1: Predict risk FIRST — outcome-aligned retrieval needs this
     risk_level, confidence = predict_risk(case_data)
 
-    # Step 6: Build the number-free summary for the LLM
+    # Step 2: Build categorical text for embedding
+    enriched_text = convert_features_to_text(case_data)
+
+    # Step 3: Human-readable case text for UI display (never passed to LLM)
+    case_text = input_to_case(case_data)
+
+    # Step 4: Outcome-aligned retrieval (Tier 1 → Tier 2 fallback)
+    matches = retrieve_outcome_aligned(
+        query_text=enriched_text,
+        risk_level=risk_level,
+        case_data=case_data,
+    )
+
+    # Step 5: Build number-free LLM booking summary
     llm_booking_summary = build_llm_booking_summary(case_data)
 
-    # Step 7: Handle no retrieved docs
-    if not filtered_docs:
+    # Step 6: Handle Tier 3 — no usable matches at all
+    if not matches:
         return {
             "case_text": case_text,
             "enriched_text": enriched_text,
@@ -496,6 +609,7 @@ def analyze_booking(case_data: dict) -> dict:
             "retrieved_count": 0,
             "risk_level": risk_level,
             "confidence": confidence,
+            "retrieval_mode": "none",
             "analysis": (
                 f"Risk Level: {risk_level} (Model confidence: {confidence}%)\n\n"
                 f"Reasoning:\n"
@@ -506,27 +620,40 @@ def analyze_booking(case_data: dict) -> dict:
             )
         }
 
-    # Step 8: Format retrieved docs using categories only
-    retrieved_context = format_docs(filtered_docs)
+    # Step 7: Detect whether fallback was used (for logging/debugging)
+    #         A match is "aligned" if its outcome matches predicted risk.
+    expected_canceled_flag = 1 if risk_level == "High" else (0 if risk_level == "Low" else None)
+    if expected_canceled_flag is not None:
+        aligned_count = sum(
+            1 for m in matches
+            if m["metadata"].get("is_canceled") in (expected_canceled_flag, bool(expected_canceled_flag))
+        )
+        retrieval_mode = "outcome-aligned" if aligned_count >= FALLBACK_MIN else "fallback-unfiltered"
+    else:
+        retrieval_mode = "medium-unfiltered"   # Medium risk — intentionally mixed
+
+    # Step 8: Format matches using category labels only
+    retrieved_context = format_matches(matches)
 
     # Step 9: Generate explanation
     chain    = explanation_prompt | llm | output_parser
     analysis = chain.invoke({
         "risk_level": risk_level,
         "confidence": confidence,
-        "llm_booking_summary": llm_booking_summary,  # ← category-only, no raw numbers
-        "retrieved_context": retrieved_context
+        "llm_booking_summary": llm_booking_summary,
+        "retrieved_context": retrieved_context,
     })
 
     return {
         "case_text": case_text,
         "enriched_text": enriched_text,
         "llm_booking_summary": llm_booking_summary,
-        "retrieved_count": len(filtered_docs),
+        "retrieved_count": len(matches),
         "retrieved_cases": retrieved_context,
         "risk_level": risk_level,
         "confidence": confidence,
-        "analysis": analysis
+        "retrieval_mode": retrieval_mode,   # useful for monitoring
+        "analysis": analysis,
     }
 
 
@@ -620,11 +747,12 @@ if __name__ == "__main__":
 
         result = analyze_booking(case)
 
-        print("LLM Booking Summary (category-only, no raw numbers):")
+        print("LLM Booking Summary (category-only):")
         print(result["llm_booking_summary"])
 
-        print(f"\nRetrieved cases : {result['retrieved_count']}")
-        print(f"Predicted risk  : {result['risk_level']} ({result['confidence']}% confidence)\n")
+        print(f"\nRetrieved cases  : {result['retrieved_count']}")
+        print(f"Retrieval mode   : {result['retrieval_mode']}")
+        print(f"Predicted risk   : {result['risk_level']} ({result['confidence']}% confidence)\n")
 
         print("Analysis:")
         print(result["analysis"])
