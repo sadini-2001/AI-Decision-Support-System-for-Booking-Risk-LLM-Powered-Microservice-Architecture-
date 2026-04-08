@@ -1,4 +1,4 @@
-# 🏨 AI Booking Risk Decision Support System
+# 🏨 AI-Powered Booking Risk Decision Support System
 
 An end-to-end AI system that predicts hotel booking cancellation risk and provides human-like explanations using a hybrid approach combining Machine Learning and Retrieval-Augmented Generation (RAG).
 
