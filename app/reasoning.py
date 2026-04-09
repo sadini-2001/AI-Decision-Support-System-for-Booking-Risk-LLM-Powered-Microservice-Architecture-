@@ -1,6 +1,5 @@
 import os
 import joblib
-import numpy as np
 import pandas as pd
 from typing import Optional, List, Any
 
@@ -9,12 +8,21 @@ from groq import Groq
 from pinecone import Pinecone
 
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_pinecone import PineconeVectorStore
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.language_models.llms import LLM
 
-from app.utils import input_to_case
+from app.utils import (
+    input_to_case,
+    categorize_lead_time,
+    categorize_adr,
+    categorize_total_stay,
+    categorize_special_requests,
+    categorize_previous_cancellations,
+    categorize_booking_changes,
+    categorize_waiting_list,
+    categorize_cancel_ratio,
+)
 
 # ─────────────────────────────────────────────
 # 1. ENVIRONMENT & API KEYS
@@ -64,86 +72,6 @@ ONE_HOT_COLS = {
     "continent": ["Africa", "Americas", "Asia", "Europe",
                   "Oceania", "Others"]
 }
-
-def categorize_lead_time(lead_time: int) -> str:
-    if lead_time <= 7:
-        return "very short lead time"
-    elif lead_time <= 30:
-        return "short lead time"
-    elif lead_time <= 90:
-        return "moderate lead time"
-    elif lead_time <= 180:
-        return "long lead time"
-    else:
-        return "very long lead time"
-
-def categorize_adr(adr: float) -> str:
-    if adr < 50:
-        return "very low rate"
-    elif adr < 100:
-        return "budget rate"
-    elif adr < 150:
-        return "mid-range rate"
-    elif adr < 250:
-        return "premium rate"
-    else:
-        return "luxury rate"
-
-def categorize_total_stay(nights: int) -> str:
-    if nights <= 1:
-        return "one-night stay"
-    elif nights <= 3:
-        return "short stay"
-    elif nights <= 7:
-        return "week-long stay"
-    else:
-        return "extended stay"
-
-def categorize_special_requests(count: int) -> str:
-    if count == 0:
-        return "no special requests"
-    elif count == 1:
-        return "one special request"
-    elif count <= 3:
-        return "several special requests"
-    else:
-        return "many special requests"
-
-def categorize_previous_cancellations(count: int) -> str:
-    if count == 0:
-        return "no prior cancellations"
-    elif count == 1:
-        return "one prior cancellation"
-    else:
-        return "multiple prior cancellations"
-
-def categorize_booking_changes(count: int) -> str:
-    if count == 0:
-        return "no booking changes"
-    elif count == 1:
-        return "one booking change"
-    else:
-        return "multiple booking changes"
-
-def categorize_waiting_list(days: int) -> str:
-    if days == 0:
-        return "no waiting list time"
-    elif days <= 10:
-        return "short waiting list"
-    else:
-        return "long waiting list"
-
-def categorize_cancel_ratio(prev_cancels: int, prev_not_cancel: int) -> str:
-    ratio = prev_cancels / (prev_cancels + prev_not_cancel + 1)
-    if ratio == 0:
-        return "zero cancellation history"
-    elif ratio < 0.3:
-        return "low historical cancellation rate"
-    elif ratio < 0.6:
-        return "moderate historical cancellation rate"
-    else:
-        return "high historical cancellation rate"
-
 
 # ─────────────────────────────────────────────
 # 4. FEATURE EXTRACTION FOR ML MODEL
@@ -196,11 +124,6 @@ index = pc.Index("booking-decision-index")
 embeddings = HuggingFaceEmbeddings(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
-
-# Keep the LangChain vector store only for embedding convenience.
-# We will NOT use its retriever — we call index.query() directly.
-vector_store = PineconeVectorStore(index=index, embedding=embeddings)
-
 
 # ─────────────────────────────────────────────
 # 6. OUTCOME-ALIGNED RETRIEVAL
@@ -460,35 +383,29 @@ def format_matches(matches: list) -> str:
     for i, match in enumerate(matches, start=1):
         meta = match["metadata"]
 
-        lead_time        = meta.get("lead_time") or 0
-        adr              = meta.get("adr") or 0
-        stay             = meta.get("total_stay") or 0
-        special_requests = meta.get("total_of_special_requests") or 0
-        prev_cancels     = int(meta.get("previous_cancellations") or 0)
-        prev_not_cancel  = int(meta.get("previous_bookings_not_canceled") or 0)
-        is_canceled      = meta.get("is_canceled")
+        is_canceled = meta.get("is_canceled")
 
-        # Normalize is_canceled — Pinecone may store as int or bool
+        # Normalize is_canceled
         canceled_label = "Canceled" if is_canceled in (1, True, "1", "True") else "Not Canceled"
 
         summary = (
             f"Past booking {i}: "
             f"Outcome={canceled_label}, "
-            f"Lead time={categorize_lead_time(lead_time)}, "
+            f"Lead time={meta.get('lead_time_category', 'unknown')}, "
             f"Deposit={meta.get('deposit_type', 'Unknown')}, "
             f"Market={meta.get('market_segment', 'Unknown')}, "
             f"Customer type={meta.get('customer_type', 'Unknown')}, "
-            f"Cancellation history={categorize_previous_cancellations(prev_cancels)}, "
-            f"Historical cancel rate={categorize_cancel_ratio(prev_cancels, prev_not_cancel)}, "
+            f"Cancellation history={meta.get('previous_cancellations_category', 'unknown')}, "
+            f"Historical cancel rate={meta.get('cancel_ratio_category', 'unknown')}, "
             f"Room assignment={'changed' if meta.get('room_mismatch') else 'as booked'}, "
-            f"Special requests={categorize_special_requests(special_requests)}, "
-            f"Stay={categorize_total_stay(stay)}, "
-            f"Rate={categorize_adr(adr)}"
+            f"Special requests={meta.get('special_requests_category', 'unknown')}, "
+            f"Stay={meta.get('total_stay_category', 'unknown')}, "
+            f"Rate={meta.get('adr_category', 'unknown')}"
         )
+
         lines.append(summary)
 
     return "\n".join(lines)
-
 
 # ─────────────────────────────────────────────
 # 12. EXPLANATION PROMPT
