@@ -4,6 +4,30 @@ An end-to-end AI system that predicts hotel booking cancellation risk and provid
 
 ---
 
+## 📚 Table of Contents
+
+- [🚀 Project Overview](#-project-overview)
+- [🧠 System Architecture](#-system-architecture)
+- [🔍 Features](#-features)
+- [🛠️ Tech Stack](#-tech-stack)
+- [💡 Key Design Decisions](#-key-design-decisions)
+  - [Feature Categorization](#-feature-categorization)
+  - [Model-Driven Risk Thresholds](#-model-driven-risk-thresholds)
+  - [Handling Evidence Conflict in RAG](#-handling-evidence-conflict-in-rag-key-innovation)
+  - [3-Tier Retrieval Strategy](#the-3-tier-retrieval-strategy)
+  - [What Gets Embedded vs Stored](#-what-gets-embedded-vs-what-gets-stored-in-pinecone)
+  - [Improved RAG Retrieval](#-improved-rag-retrieval)
+  - [Step-by-Step Retrieval](#-step-by-step-how-retrieval-works)
+  - [Prompt Engineering](#-prompt-engineering)
+- [⚠️ Challenges & Solutions](#-challenges--solutions)
+- [▶️ How to Run](#️-how-to-run-the-project)
+- [📊 Retrieval Mode Reference](#retrieval-mode-reference)
+- [🎯 Key Takeaways](#-key-takeaways)
+- [📸 Demo](#-demo)
+
+---
+
+
 ## 🚀 Project Overview
 
 Traditional machine learning models provide predictions but lack interpretability. This project goes beyond prediction by building a decision support system that answers:
