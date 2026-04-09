@@ -30,15 +30,15 @@ Vector DB (Pinecone, queried directly) + LLM (Groq)
 ### Internal Pipeline
 
 ```
- Input booking dict
-         │
-         ▼
+         Input booking dict
+                 │
+                 ▼
 ┌─────────────────────────────────────────┐
 │  STEP 1 — predict_risk()                │
 │  Random Forest → Low / Medium / High    │
 └───────────────────┬─────────────────────┘
                     │
-         risk_level drives what comes next
+                    |
                     │
           ┌─────────┴──────────┐
           │                    │
@@ -62,12 +62,12 @@ Vector DB (Pinecone, queried directly) + LLM (Groq)
          └──────────┬─────────────┘
                     │
                     ▼
-┌─────────────────────────────────────────┐
-│  STEP 3 — explanation_prompt            │
-│  Groq LLaMA 3.1 8B                     │
-│  Reasons using feature importance order │
-│  Outputs: risk level + recommendation   │
-└───────────────────┬─────────────────────┘
+┌────────────────────────────────────────────────────┐
+│  STEP 3 — explanation_prompt                       │
+│  Groq LLaMA 3.1 8B                                 │
+│  Reasons using feature importance order            │
+│  Outputs: risk level + reasoning + recommendation  │
+└───────────────────┬────────────────────────────────┘
                     │
                     ▼
              analysis dict
@@ -127,7 +127,7 @@ Converted raw numerical values into semantic categories before passing anything 
 | `total_of_special_requests` | `3` | `several special requests` |
 | `cancel_ratio` | `0.67` | `moderate historical cancellation rate` |
 
-This improved reasoning quality and similarity matching, and eliminated a class of LLM errors where raw numbers were leaked or misinterpreted.
+This improved reasoning quality and similarity matching, and eliminated a class of LLM errors where raw numbers were misinterpreted.
 
 ### 🔸 Model-Driven Risk Thresholds
 
@@ -156,14 +156,14 @@ Booking features  →  retrieve top-5 similar cases
                     ┌──────┴──────┐
                     │             │
                Canceled      Not Canceled
-               (2 cases)     (3 cases)
+               (1 cases)     (4 cases)
                     │             │
                     └──────┬──────┘
                            │
                     LLM sees mixed evidence
                            │
                     "Model says High Risk,
-                     but 3 similar bookings
+                     but 4 similar bookings
                      did NOT cancel..." ← CONTRADICTION
 ```
 
@@ -198,25 +198,32 @@ The key architectural insight is that **prediction must happen before retrieval*
 │                                                             │
 │  High Risk  →  filter: is_canceled == 1                     │
 │  Low Risk   →  filter: is_canceled == 0                     │
-│  Medium     →  no filter  (mixed context is appropriate)    │
+│  Medium     →  no filter (mixed context is appropriate)     │
 │                                                             │
-│  Requires: ≥ 2 results above cosine threshold (0.65)        │
+│  Requires: ≥ 2 results AFTER applying:                      │
+│           • cosine similarity threshold (≥ 0.65)            │
+│           • lead-time proximity filter                      │
 └──────────────────────┬──────────────────────────────────────┘
                        │ < 2 results? → escalate to Tier 2
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  TIER 2 — Unfiltered Fallback                               │
 │                                                             │
-│  Drops the outcome filter. Returns the closest neighbors    │
-│  regardless of cancellation outcome.                        │
-│  Triggered when outcome-matching cases are sparse in DB.    │
+│  Drops outcome filter and retrieves nearest neighbors.      │
+│  Still applies:                                             │
+│  • cosine similarity threshold                              │
+│  • lead-time proximity filter                               │
+│                                                             │
+│  Triggered when outcome-aligned cases are insufficient.     │
 └──────────────────────┬──────────────────────────────────────┘
-                       │ 0 results after fallback? → escalate to Tier 3
+                       │ no usable results? → escalate to Tier 3
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  TIER 3 — ML-Only Explanation                               │
 │                                                             │
-│  No retrieved cases at all. Returns a graceful fallback:    │
+│  No valid retrieved cases after filtering.                  │
+│  Falls back to ML-only reasoning.                           │
+│                                                             │
 │  "Risk determined solely by the trained ML model.           │
 │   Review this booking manually."                            │
 └─────────────────────────────────────────────────────────────┘
@@ -238,7 +245,7 @@ Two separate representations of each booking are maintained in the vector databa
 
 The embedding text looks like this:
 ```
-"Hotel booking case. This booking has long lead time, budget rate, and a short stay.
+"City Hotel booking case. This booking has long lead time, budget rate, and a short stay.
 There are 2 guests. The booking has no special requests, two prior cancellations,
 no booking changes, not on waiting list, and moderate historical cancellation rate.
 Deposit type is No Deposit. Market segment is Online TA. Customer type is Transient.
