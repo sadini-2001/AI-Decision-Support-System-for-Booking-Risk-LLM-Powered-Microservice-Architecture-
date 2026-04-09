@@ -21,7 +21,6 @@ An end-to-end AI system that predicts hotel booking cancellation risk and provid
   - [Prompt Engineering](#-prompt-engineering)
 - [⚠️ Challenges & Solutions](#-challenges--solutions)
 - [▶️ How to Run](#️-how-to-run-the-project)
-- [📊 Retrieval Mode Reference](#retrieval-mode-reference)
 - [🎯 Key Takeaways](#-key-takeaways)
 - [📸 Demo](#-demo)
 
@@ -416,17 +415,6 @@ streamlit run frontend/app.py
 ```
 
 Open in browser: http://localhost:8501
-
----
-
-### Retrieval Mode Reference
-
-| Value | Meaning |
-|---|---|
-| `outcome-aligned` | Tier 1 succeeded — retrieved cases match predicted outcome |
-| `fallback-unfiltered` | Tier 2 triggered — not enough outcome-matching cases in DB |
-| `medium-unfiltered` | Medium risk — intentionally mixed retrieval |
-| `none` | Tier 3 — no usable matches, ML-only explanation returned |
 
 ---
 
