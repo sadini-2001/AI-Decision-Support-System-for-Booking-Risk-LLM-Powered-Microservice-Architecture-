@@ -370,52 +370,64 @@ This improved consistency and interpretability of LLM responses.
 
 ## ▶️ How to Run the Project
 
-### 🔹 1. Clone the repository
-
+### 1. Clone the Repository
+ 
 ```bash
-git clone <your-repo-link>
+git clone <repository-url>
 cd AI_DecisionSupportSystem_for_BookingRisk
 ```
-
-### 🔹 2. Activate virtual environment
-
+ 
+### 2. Activate Virtual Environment
+ 
+**Windows:**
 ```bash
-.venv\Scripts\Activate
+.venv\Scripts\activate
 ```
-
-### 🔹 3. Configure environment variables
-
-Create a `.env` file in the root directory:
-
+ 
+**Mac/Linux:**
+```bash
+source .venv/bin/activate
+```
+ 
+### 3. Install Dependencies
+ 
+```bash
+pip install -r requirements.txt
+```
+ 
+### 4. Configure Environment Variables
+ 
+Create a `.env` file in the root directory and add your API keys:
+ 
 ```env
 PINECONE_API_KEY=your_pinecone_key
 GROQ_API_KEY=your_groq_key
 ```
-
-### 🔹 4. Prepare vector database (IMPORTANT)
-
+ 
+### 5. Prepare the Vector Database
+ 
+> ⚠️ **Important:** This step must be completed before starting the backend.
+ 
 ```bash
 python backend/ingest.py
 ```
-
-This uploads booking cases into Pinecone. Must be run before starting the backend.
-
-### 🔹 5. Run Backend (FastAPI)
-
+ 
+This uploads booking cases into Pinecone and initializes the vector database.
+ 
+### 6. Run the Backend (FastAPI)
+ 
 ```bash
 python -m uvicorn backend.main:app --reload --port 8000
 ```
-
-Open in browser: http://127.0.0.1:8000/docs
-
-### 🔹 6. Run Frontend (Streamlit)
-
+ 
+The API will be available at `http://localhost:8000`.
+ 
+### 7. Run the Frontend (Streamlit)
+ 
 ```bash
 streamlit run frontend/app.py
 ```
-
-Open in browser: http://localhost:8501
-
+ 
 ---
 
 ## 🎯 Key Takeaways
