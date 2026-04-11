@@ -409,7 +409,7 @@ GROQ_API_KEY=your_groq_key
 > ⚠️ **Important:** This step must be completed before starting the backend.
  
 ```bash
-python backend/ingest.py
+python app/ingest.py
 ```
  
 This uploads booking cases into Pinecone and initializes the vector database.
